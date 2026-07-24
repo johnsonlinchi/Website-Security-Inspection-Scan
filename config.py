@@ -24,3 +24,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "security-bot@portwell.com.tw")
+
+# WordPress 後台 API / REST API 驗證帳密 (用於內部授權掃描精確取得 PHP / SQL 版本)
+# 若有設定此變數，程式將帶入 Basic Auth / Bearer 存取 REST API 系統資訊
+WP_AUTH_USER = os.getenv("WP_AUTH_USER", "")
+WP_AUTH_PASS = os.getenv("WP_AUTH_PASS", "")

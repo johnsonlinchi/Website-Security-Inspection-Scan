@@ -1,11 +1,11 @@
 import sys
 import time
-from config import SITES, ALLOWED_RECIPIENT
+from config import SITES, DEFAULT_RECIPIENT, ALLOWED_RECIPIENTS
 from inspector import run_all_inspections
 from reporter import generate_reports
 from mailer import send_inspection_email
 
-def run_routine_inspection(target_recipient: str = ALLOWED_RECIPIENT):
+def run_routine_inspection(target_recipient: str = DEFAULT_RECIPIENT):
     print("=" * 60)
     print("[START] 啟動 Portwell WordPress 站台安全巡檢作業")
     print("固定巡檢 5 個目標站台:")
@@ -34,5 +34,5 @@ def run_routine_inspection(target_recipient: str = ALLOWED_RECIPIENT):
         print("[FAILED] 巡檢作業完成，但郵件寄送失敗或被攔截。")
 
 if __name__ == "__main__":
-    recipient_arg = sys.argv[1] if len(sys.argv) > 1 else ALLOWED_RECIPIENT
+    recipient_arg = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_RECIPIENT
     run_routine_inspection(recipient_arg)

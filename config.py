@@ -9,8 +9,14 @@ SITES = [
     {"name": "DC 站", "url": "https://download.portwell.tw"}
 ]
 
-# 允許的固定唯一收件者
-ALLOWED_RECIPIENT = "39620@portwell.com.tw"
+# 允許的固定收件者 (支援預設 39620@portwell.com.tw 與測試帳號 johnson.lin@portwell.com.tw)
+ALLOWED_RECIPIENTS = [
+    "39620@portwell.com.tw",
+    "johnson.lin@portwell.com.tw"
+]
+
+# 預設預設收件者
+DEFAULT_RECIPIENT = "39620@portwell.com.tw"
 
 # SMTP 發信設定 (可透過環境變數覆寫)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")

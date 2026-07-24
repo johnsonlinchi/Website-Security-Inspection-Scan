@@ -18,11 +18,12 @@ SECURITY_HEADERS = [
 def check_wp_cve(version: str) -> List[Dict[str, str]]:
     """比對 WordPress 核心版本已知 CVE 漏洞資料庫"""
     cve_hits = []
-    if not version or version == "Unknown":
+    if not version or version in ["Unknown", "未公開揭露"]:
         return cve_hits
         
     try:
-        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=WordPress%20{urllib.parse.quote(version)}"
+        # 嚴格精確查詢 WordPress 核心 CVE (避免混淆外掛/第三方庫版本)
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=cpe:2.3:a:wordpress:wordpress:{urllib.parse.quote(version)}:*:*:*:*:*:*:*"
         req = urllib.request.Request(url, headers={"User-Agent": "PortwellSecBot/1.0"})
         context = ssl.create_default_context()
         context.check_hostname = False
@@ -38,7 +39,7 @@ def check_wp_cve(version: str) -> List[Dict[str, str]]:
                 desc_text = descriptions[0].get("value", "") if descriptions else "無詳細說明"
                 cve_hits.append({
                     "id": cve_id,
-                    "desc": f"WordPress {version} 命中 NVD CVE: {desc_text[:120]}...",
+                    "desc": f"WordPress 核心 ({version}) 命中 NVD CVE: {desc_text[:120]}...",
                     "severity": "High"
                 })
     except Exception:
@@ -48,7 +49,7 @@ def check_wp_cve(version: str) -> List[Dict[str, str]]:
             if major < 6.4:
                 cve_hits.append({
                     "id": "CVE-2023-5561 / CVE-2023-38000",
-                    "desc": f"WordPress {version} (過舊核心版本): 存在未授權資訊洩漏與遠端程式碼執行 (RCE) 已知高風險漏洞公告",
+                    "desc": f"WordPress 核心 ({version}) 為過舊版本: 存在未授權資訊洩漏與遠端程式碼執行 (RCE) 已知高風險漏洞公告",
                     "severity": "Critical"
                 })
         except Exception:
@@ -59,7 +60,7 @@ def check_wp_cve(version: str) -> List[Dict[str, str]]:
 def check_php_cve(version: str) -> List[Dict[str, str]]:
     """比對 PHP 版本已知 CVE 與 EOL 漏洞"""
     cve_hits = []
-    if not version or version == "Unknown":
+    if not version or version in ["Unknown", "未公開揭露"]:
         return cve_hits
         
     try:
@@ -97,24 +98,7 @@ def probe_extended_wp_endpoints(base_url: str, context: ssl.SSLContext) -> Dict[
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PortwellSecurityBot/1.0"}
     
-    # 1. 探測 /wp-json/ REST API 節點
-    try:
-        api_url = base_url.rstrip('/') + '/wp-json/'
-        req = urllib.request.Request(api_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5, context=context) as resp:
-            api_data = json.loads(resp.read().decode('utf-8'))
-            ext_results["evidence"].append("WordPress REST API (/wp-json/) 處於公開啟用狀態")
-            
-            # 部分擴充套件會在 API 根目錄揭露系統與版本資訊
-            if "name" in api_data:
-                ext_results["evidence"].append(f"REST API 站台名稱: {api_data.get('name')}")
-            if "namespaces" in api_data:
-                namespaces = api_data.get("namespaces", [])
-                ext_results["evidence"].append(f"REST API 命名空間發現 ({len(namespaces)} 個組件)")
-    except Exception:
-        pass
-
-    # 2. 探測 /feed/ (RSS Feed 的 generator 標籤)
+    # 1. 探測 /feed/ (RSS Feed 的 generator 標籤)
     try:
         feed_url = base_url.rstrip('/') + '/feed/'
         req = urllib.request.Request(feed_url, headers=headers)
@@ -123,11 +107,11 @@ def probe_extended_wp_endpoints(base_url: str, context: ssl.SSLContext) -> Dict[
             wp_feed_match = re.search(r'<generator>https?://wordpress\.org/\?v=([\d\.]+)</generator>', feed_text, re.IGNORECASE)
             if wp_feed_match:
                 ext_results["wp_version"] = wp_feed_match.group(1)
-                ext_results["evidence"].append(f"從 RSS Feed (/feed/) 成功擷取到 WordPress 核心版本: {ext_results['wp_version']}")
+                ext_results["evidence"].append(f"從 RSS Feed (/feed/) 擷取到 WordPress 核心版本: {ext_results['wp_version']}")
     except Exception:
         pass
 
-    # 3. 探測 /readme.html (傳統 WP 靜態說明檔)
+    # 2. 探測 /readme.html (傳統 WP 靜態說明檔)
     try:
         readme_url = base_url.rstrip('/') + '/readme.html'
         req = urllib.request.Request(readme_url, headers=headers)
@@ -201,24 +185,29 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
                     if php_match:
                         result["php_version"] = php_match.group(1)
 
-            # 3. 讀取 HTML 內容嘗試解析 WP generator meta 與靜態資源 ?ver= 參數
+            # 3. 讀取 HTML 內容解析 WP 核心版本
             html_bytes = response.read()
             html_text = html_bytes.decode('utf-8', errors='ignore')
             
-            # 3a. 解析 WP generator meta
+            # 3a. 解析 WP generator meta (最權威之公開標示)
             wp_gen_match = re.search(r'<meta\s+name=["\']generator["\']\s+content=["\']WordPress\s+([\d\.]+)["\']', html_text, re.IGNORECASE)
             if wp_gen_match:
                 result["wp_version"] = wp_gen_match.group(1)
                 result["evidence"].append(f"發現 WordPress 核心 Meta 標示: {result['wp_version']}")
 
-            # 3b. 從 wp-includes/ 靜態 CSS/JS 的 ?ver= 參數推算核心版本
+            # 3b. 僅針對 WP 專屬的核心腳本 (如 wp-embed.min.js 或 block-library/style.css) 解析 ?ver= 參數
+            # 排除 jQuery (v3.7.1) 等第三方 JS 庫帶來的誤判！
             if result["wp_version"] == "Unknown":
-                ver_match = re.search(r'wp-includes/[^"\']+\?ver=([\d\.]+)', html_text)
-                if ver_match:
-                    result["wp_version"] = ver_match.group(1)
-                    result["evidence"].append(f"從靜態資源 (?ver=) 提取 WordPress 核心版本: {result['wp_version']}")
+                embed_ver = re.search(r'wp-includes/js/wp-embed\.min\.js\?ver=([\d\.]+)', html_text)
+                block_ver = re.search(r'wp-includes/css/dist/block-library/style\.min\.css\?ver=([\d\.]+)', html_text)
+                if embed_ver:
+                    result["wp_version"] = embed_ver.group(1)
+                    result["evidence"].append(f"從 wp-embed 核心元件提取 WP 版本: {result['wp_version']}")
+                elif block_ver:
+                    result["wp_version"] = block_ver.group(1)
+                    result["evidence"].append(f"從 block-library 核心元件提取 WP 版本: {result['wp_version']}")
 
-            # 3c. 從 wp-content/plugins/ 擷取外掛與對應 ?ver= 版本號
+            # 3c. 解析外掛元件 (區分外掛版本與核心版本)
             plugin_ver_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)
             found_plugins = {}
             for p_name, p_ver in plugin_ver_matches:
@@ -227,7 +216,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
             plugins_found_plain = set(re.findall(r'wp-content/plugins/([^/\?\'"]+)', html_text))
             for p in plugins_found_plain:
                 if p not in found_plugins:
-                    found_plugins[p] = "未知版本"
+                    found_plugins[p] = "已知安裝"
 
             themes_found = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
             
@@ -241,13 +230,13 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
         result["evidence"].append(f"無法透過公開網路存取連線: {str(e)}")
         result["https_status"] = "連線失敗"
 
-    # 4. 多維度路徑探測 (RSS Feed / REST API / Readme)
+    # 4. 多維度路徑探測 (RSS Feed / Readme)
     ext_data = probe_extended_wp_endpoints(url, context)
     result["evidence"].extend(ext_data["evidence"])
     if result["wp_version"] == "Unknown" and ext_data["wp_version"] != "Unknown":
         result["wp_version"] = ext_data["wp_version"]
 
-    # 5. CVE 漏洞自動實時比對
+    # 5. CVE 漏洞自動比對 (僅當確定核心版本才查詢)
     wp_cves = check_wp_cve(result["wp_version"])
     result["cve_hits"].extend(wp_cves)
 
@@ -263,7 +252,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
             result["risk_level"] = "High"
 
     if result["wp_version"] == "Unknown":
-        result["manual_checks"].append("WordPress 核心版本 (靜態/Feed/API 未顯式揭露)")
+        result["manual_checks"].append("WordPress 核心版本 (前台已被防衛性隱藏，建議後台確認)")
 
     return result
 

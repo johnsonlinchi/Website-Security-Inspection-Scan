@@ -1,12 +1,13 @@
 import os
 
-# 預設巡檢與盤點站台
+# 預設巡檢與盤點站台 (已加入中國站)
 SITES = [
     {"name": "國際站", "url": "https://www.portwell.com.tw"},
     {"name": "台灣站", "url": "https://www.portwell.tw"},
     {"name": "AI 站",  "url": "https://www.portwell.ai"},
     {"name": "智利站", "url": "https://www.portwell.cl"},
-    {"name": "DC 站",  "url": "https://download.portwell.tw"}
+    {"name": "DC 站",  "url": "https://download.portwell.tw"},
+    {"name": "中國站", "url": "https://www.portwell.com.cn"}
 ]
 
 # 基準環境版本 (如 PHP 8.3.32)

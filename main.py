@@ -8,12 +8,12 @@ from mailer import send_inspection_email
 def run_routine_inspection(target_recipient: str = DEFAULT_RECIPIENT):
     print("=" * 60)
     print("[START] 啟動 Portwell WordPress 站台安全巡檢作業")
-    print("固定巡檢 5 個目標站台:")
+    print(f"固定巡檢 {len(SITES)} 個目標站台:")
     for s in SITES:
         print(f" - {s['name']}: {s['url']}")
     print("=" * 60)
 
-    # 1. 執行被動式安全檢測
+    # 1. 執行資產盤點與維運檢測
     print("\n[1/3] 執行網址版本與安全標頭檢查中...")
     inspection_results = run_all_inspections(SITES)
     

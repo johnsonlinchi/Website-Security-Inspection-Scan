@@ -1,3 +1,4 @@
+import os
 import re
 import urllib.request
 import ssl
@@ -5,6 +6,9 @@ import time
 import logging
 from typing import Dict, List, Any
 from config import BASELINE_PHP_VERSION, REQUEST_TIMEOUT, REQUEST_RETRY, USER_AGENT, LOG_FILE
+
+# 自動建立 logs 目錄
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 # 初始化 Logger
 logging.basicConfig(
@@ -87,12 +91,11 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     if wp_gen:
         result["wp_version"] = wp_gen.group(1)
     else:
-        # 嘗試從核心腳本路徑萃取
         embed_ver = re.search(r'wp-includes/js/wp-embed\.min\.js\?ver=([5-9]\.[\d\.]+)', html_text)
         if embed_ver:
             result["wp_version"] = embed_ver.group(1)
         else:
-            result["manual_checks"].append("WordPress 核心版本 (前台已進性防衛性隱蔽，建議從後台確認)")
+            result["manual_checks"].append("WordPress 核心版本 (前台已進行防衛性隱蔽，建議從後台確認)")
 
     # 3. 外掛與主題盤點
     plugin_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)

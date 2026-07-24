@@ -18,7 +18,7 @@ SECURITY_HEADERS = [
 ]
 
 def is_valid_wp_version(ver_str: str) -> bool:
-    """驗證是否為有效的 WordPress 核心版本號 (至少兩位，且大於等於 5.0)"""
+    """驗證是否為有效的 WordPress 核心版本號"""
     if not ver_str or ver_str in ["Unknown", "未公開揭露"]:
         return False
     if re.match(r'^[5-9]\.\d+(\.\d+)?$', ver_str):
@@ -67,69 +67,90 @@ def check_wp_cve(version: str) -> List[Dict[str, str]]:
     return cve_hits
 
 def check_php_cve(version: str) -> List[Dict[str, str]]:
-    """比對 PHP 版本已知 CVE 與 EOL 漏洞"""
+    """比對 PHP 版本已知 CVE 與安全版本要求"""
     cve_hits = []
     if not version or version in ["Unknown", "未公開揭露"]:
         return cve_hits
         
     try:
         v_parts = version.split('.')
-        major_minor = f"{v_parts[0]}.{v_parts[1]}" if len(v_parts) >= 2 else version
-        
-        if major_minor.startswith("7.") or major_minor.startswith("5."):
-            cve_hits.append({
-                "id": "CVE-2024-4577 / CVE-2023-3824 (PHP EOL 警示)",
-                "desc": f"PHP {version} 已停止官方安全更新 (EOL)。存在 CGI 引數注入 (CGI Argument Injection) 與緩衝區溢位嚴重漏洞！",
-                "severity": "Critical"
-            })
-        elif major_minor in ["8.0", "8.1"]:
-            cve_hits.append({
-                "id": "CVE-2024-2756 (PHP 8.0/8.1 EOL 警示)",
-                "desc": f"PHP {version} 已接近或過期安全生命週期，建議升級至 PHP 8.2 或 8.3 以維護資安。",
-                "severity": "High"
-            })
+        if len(v_parts) >= 2:
+            major = int(v_parts[0])
+            minor = int(v_parts[1])
+            patch = int(v_parts[2]) if len(v_parts) >= 3 else 0
+            
+            # 比對資訊部 Tenable/Nessus Nessus Plugin ID 313114 & 324980 (PHP 8.3.x < 8.3.31 / 8.3.32)
+            if major == 8 and minor == 3:
+                if patch < 31:
+                    cve_hits.append({
+                        "id": "CVE-2025-14179 / CVE-2026-6722 / CVE-2026-7258",
+                        "desc": f"PHP {version} (低於 8.3.31/8.3.32): 存在多重 Critical/High 漏洞，包含記憶體溢位與非預期行為，請升級至 PHP 8.3.32+",
+                        "severity": "Critical"
+                    })
+                elif patch < 32:
+                    cve_hits.append({
+                        "id": "CVE-2026-12184 / CVE-2026-14355",
+                        "desc": f"PHP {version} (低於 8.3.32): 存在 Medium 漏洞風險，建議升級至 PHP 8.3.32+",
+                        "severity": "Medium"
+                    })
+            elif major == 7 or major == 5:
+                cve_hits.append({
+                    "id": "CVE-2024-4577 / CVE-2023-3824 (PHP EOL 警示)",
+                    "desc": f"PHP {version} 已停止官方安全更新 (EOL)。存在 CGI 引數注入與緩衝區溢位嚴重漏洞！",
+                    "severity": "Critical"
+                })
+            elif major == 8 and minor in [0, 1, 2]:
+                cve_hits.append({
+                    "id": "CVE-2024-2756 (PHP 舊版 8.x 警示)",
+                    "desc": f"PHP {version} 建議升級至最新的 PHP 8.3.32+ 以維持資安修補狀態。",
+                    "severity": "High"
+                })
     except Exception:
         pass
         
     return cve_hits
 
-def probe_authenticated_rest_api(base_url: str, context: ssl.SSLContext) -> Dict[str, str]:
+def probe_php_via_active_fingerprinting(base_url: str, context: ssl.SSLContext) -> str:
     """
-    透過授權 REST API / Site Health / WP-JSON 撈取精確的 PHP 與 MySQL 版本 (比照資訊部內網掃描途徑)
+    無需帳密：透過資安掃描器常見的無損 Active Fingerprinting (如 PHP 專屬 Easter Egg 與網頁回應表頭特徵) 獲取精確 PHP 版本
     """
-    auth_info = {"php_version": "Unknown", "sql_version": "Unknown", "wp_version": "Unknown"}
-    if not WP_AUTH_USER or not WP_AUTH_PASS:
-        return auth_info
-
-    try:
-        # 使用 Basic Auth 帶入 WP App Password
-        credentials = f"{WP_AUTH_USER}:{WP_AUTH_PASS}"
-        encoded_cred = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PortwellSecurityBot/1.0",
-            "Authorization": f"Basic {encoded_cred}"
-        }
-
-        # 請求 WordPress 後台 Site Health / System Info API
-        health_url = base_url.rstrip('/') + '/wp-json/wp/v2/settings'
-        req = urllib.request.Request(health_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5, context=context) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            # 撈取內部 API 設定檔版本數據
-            if "wp_version" in data:
-                auth_info["wp_version"] = str(data["wp_version"])
-
-        # 試圖請求內部 API 暴露之 server 資訊
-        server_url = base_url.rstrip('/') + '/wp-json/wp/v2/users/me'
-        req_me = urllib.request.Request(server_url, headers=headers)
-        with urllib.request.urlopen(req_me, timeout=5, context=context) as resp_me:
-            # 存取成功，代表 API 認證成功
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PortwellSecurityBot/1.0"}
+    
+    # 1. 探測傳統 PHP Easter Egg 頁面 (Nessus/Nikto 常用手法，如 ?=PHPE9568F36-D428-11d2-A769-00AA001ACF42)
+    easter_eggs = [
+        "?=PHPE9568F36-D428-11d2-A769-00AA001ACF42", # PHP Credits
+        "?=PHPB8B5F2A0-3C92-11d3-A3A9-4C7B08C10000"  # PHP Logo
+    ]
+    for egg in easter_eggs:
+        try:
+            egg_url = base_url.rstrip('/') + '/' + egg
+            req = urllib.request.Request(egg_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=4, context=context) as resp:
+                resp_headers = dict(resp.info())
+                x_powered = resp_headers.get("X-Powered-By") or resp_headers.get("x-powered-by") or ""
+                server_hdr = resp_headers.get("Server") or resp_headers.get("server") or ""
+                
+                php_match = re.search(r'PHP/([\d\.]+)', x_powered + " " + server_hdr, re.IGNORECASE)
+                if php_match:
+                    return php_match.group(1)
+        except Exception:
             pass
+
+    # 2. 探測常見的預設路徑或組件釋出的 Header
+    try:
+        req = urllib.request.Request(base_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5, context=context) as resp:
+            resp_headers = dict(resp.info())
+            x_powered = resp_headers.get("X-Powered-By") or resp_headers.get("x-powered-by") or ""
+            server_hdr = resp_headers.get("Server") or resp_headers.get("server") or ""
+            
+            php_match = re.search(r'PHP/([\d\.]+)', x_powered + " " + server_hdr, re.IGNORECASE)
+            if php_match:
+                return php_match.group(1)
     except Exception:
         pass
 
-    return auth_info
+    return "Unknown"
 
 def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
     url = site["url"]
@@ -147,7 +168,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
         "cve_hits": [],
         "risk_level": "Low",
         "evidence": [],
-        "manual_checks": ["PHP 版本 (若伺服器隱藏 Header，需後台/內部 API 確認)", "MySQL/MariaDB 版本 (需內部存取確認)", "完整外掛/主題清單 (需後台確認)"]
+        "manual_checks": ["MySQL/MariaDB 版本 (需內部 DB 存取確認)", "完整外掛/主題清單 (需後台確認)"]
     }
     
     context = ssl.create_default_context()
@@ -157,6 +178,12 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PortwellSecurityBot/1.0"
     }
+
+    # 主動探測 PHP 版本
+    detected_php = probe_php_via_active_fingerprinting(url, context)
+    if detected_php != "Unknown":
+        result["php_version"] = detected_php
+        result["evidence"].append(f"成功偵測到伺服器 PHP 版本: {result['php_version']}")
 
     try:
         req = urllib.request.Request(url, headers=headers)
@@ -178,24 +205,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
                 if result["risk_level"] in ["Low"]:
                     result["risk_level"] = "Medium"
 
-            # 2. 探測 Server / X-Powered-By / WhatWeb 特徵標頭中的 PHP 版本
-            server_header = resp_headers.get("Server") or resp_headers.get("server")
-            x_powered = resp_headers.get("X-Powered-By") or resp_headers.get("x-powered-by")
-            if server_header:
-                result["evidence"].append(f"Server 標頭回應: {server_header}")
-                # 嘗試抓取 Server 欄位中的 PHP (如 Apache/2.4.41 PHP/7.4.3)
-                php_srv = re.search(r'PHP/([\d\.]+)', server_header, re.IGNORECASE)
-                if php_srv:
-                    result["php_version"] = php_srv.group(1)
-
-            if x_powered:
-                result["evidence"].append(f"X-Powered-By 揭露: {x_powered}")
-                if "PHP" in x_powered:
-                    php_match = re.search(r'PHP/([\d\.]+)', x_powered, re.IGNORECASE)
-                    if php_match:
-                        result["php_version"] = php_match.group(1)
-
-            # 3. 解析 HTML 中的 WP 核心版本 (排除 jQuery 等第三方套件誤判)
+            # 2. 解析 HTML 中的 WP 核心版本
             html_bytes = response.read()
             html_text = html_bytes.decode('utf-8', errors='ignore')
             
@@ -214,7 +224,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
                     result["wp_version"] = block_ver.group(1)
                     result["evidence"].append(f"從 block-library 核心元件提取 WP 版本: {result['wp_version']}")
 
-            # 4. 解析外掛與主題
+            # 3. 解析外掛與主題
             plugin_ver_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)
             found_plugins = {}
             for p_name, p_ver in plugin_ver_matches:
@@ -237,16 +247,7 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
         result["evidence"].append(f"無法透過公開網路存取連線: {str(e)}")
         result["https_status"] = "連線失敗"
 
-    # 5. 授權掃描探測 (若有提供 WP_AUTH_USER / WP_AUTH_PASS)
-    auth_data = probe_authenticated_rest_api(url, context)
-    if auth_data["php_version"] != "Unknown":
-        result["php_version"] = auth_data["php_version"]
-        result["evidence"].append(f"透過授權 REST API 取得精確 PHP 版本: {result['php_version']}")
-    if auth_data["sql_version"] != "Unknown":
-        result["sql_version"] = auth_data["sql_version"]
-        result["evidence"].append(f"透過授權 REST API 取得精確 SQL 版本: {result['sql_version']}")
-
-    # 6. CVE 漏洞比對
+    # 4. CVE 漏洞比對
     if is_valid_wp_version(result["wp_version"]):
         wp_cves = check_wp_cve(result["wp_version"])
         result["cve_hits"].extend(wp_cves)
@@ -263,7 +264,9 @@ def check_site_security(site: Dict[str, str]) -> Dict[str, Any]:
             result["risk_level"] = "High"
 
     if result["wp_version"] == "Unknown":
-        result["manual_checks"].append("WordPress 核心版本 (前台已被防衛性隱藏，建議後台確認)")
+        result["manual_checks"].append("WordPress 核心版本 (前台已被隱蔽，建議後台確認)")
+    if result["php_version"] == "Unknown":
+        result["manual_checks"].append("PHP 版本 (WebServer 設有嚴格隱蔽，建議後台/主機確認)")
 
     return result
 

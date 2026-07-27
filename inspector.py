@@ -35,6 +35,32 @@ ADDON_KEYWORDS = [
     "for woocommerce", "for elementor", "beaver builder", "mailchimp for"
 ]
 
+def parse_version_tuple(ver_str: str) -> tuple:
+    """將版本字串轉換為可進行大於/小於比對的數字 Tuple (例如 '4.2.0' -> (4, 2, 0))"""
+    clean = re.sub(r'[^\d\.]', '', ver_str)
+    parts = [int(p) for p in clean.split('.') if p.isdigit()]
+    return tuple(parts)
+
+def is_version_vulnerable(current_ver: str, cve_desc: str) -> bool:
+    """
+    解析 CVE 描述中的版本影響範圍，並進行精確的 SemVer 數字比對：
+    如果當前版本 >= 修補版本 (e.g. 'before 4.2.0' 且當前為 '4.2.0')，則判定為已修補 (不發告警)
+    """
+    curr_tuple = parse_version_tuple(current_ver)
+    if not curr_tuple:
+        return True
+
+    # 1. 匹配 "before X.X.X" 或 "prior to X.X.X" 或 "<= X.X.X"
+    match_before = re.search(r'(?:before|prior to|<|up to|through)\s+v?([\d\.]+)', cve_desc, re.IGNORECASE)
+    if match_before:
+        fixed_ver_tuple = parse_version_tuple(match_before.group(1))
+        if fixed_ver_tuple:
+            # 如果當前版本 >= 漏洞修補版本，代表已安全修補！
+            if curr_tuple >= fixed_ver_tuple:
+                return False
+
+    return True
+
 def get_exact_plugin_version(base_url: str, plugin_slug: str) -> str:
     """從外掛公開之 readme.txt 精確讀取真實版號 (若失敗則回傳空)"""
     readme_url = f"{base_url.rstrip('/')}/wp-content/plugins/{plugin_slug}/readme.txt"
@@ -92,7 +118,7 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     return hits
 
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:
-    """連線 NIST NVD 比對外掛版號線上 CVE (嚴格排除第三方 Addons 誤報)"""
+    """連線 NIST NVD 比對外掛版號線上 CVE (包含名稱過濾 + 語意化版本 SemVer 數字區間比對)"""
     hits = []
     if not plugin_version or plugin_version in ["已知安裝", "Unknown"]:
         return hits
@@ -102,7 +128,6 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
         return hits
 
     try:
-        # 使用精確外掛標頭查詢
         query = f"wordpress plugin {plugin_name} {plugin_version}"
         url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={urllib.parse.quote(query)}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -117,7 +142,7 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
                 desc = cve_data.get("descriptions", [{}])[0].get("value", "")
                 desc_lower = desc.lower()
                 
-                # 1. 檢查是否屬於第三方 Addon 誤報 (如 Starter Templates 誤判給 Elementor)
+                # 1. 檢查是否屬於第三方 Addon 誤報
                 is_addon_mismatch = any(addon_kw in desc_lower for addon_kw in ADDON_KEYWORDS)
                 if is_addon_mismatch:
                     continue
@@ -125,11 +150,15 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
                 # 2. 嚴格驗證 CVE 說明必須包含該外掛名稱主體
                 clean_plugin_name = plugin_name.replace('-', ' ').lower()
                 if clean_plugin_name in desc_lower:
-                    hits.append({
-                        "id": cve_id,
-                        "desc": f"外掛 {plugin_name} (v{plugin_version}) 命中 CVE: {desc[:100]}...",
-                        "severity": "High"
-                    })
+                    # 3. 語意化版本 (SemVer) 數字範圍比對：判斷當前版本是否真的在受受影響區間內
+                    if is_version_vulnerable(plugin_version, desc):
+                        hits.append({
+                            "id": cve_id,
+                            "desc": f"外掛 {plugin_name} (v{plugin_version}) 命中 CVE: {desc[:100]}...",
+                            "severity": "High"
+                        })
+                    else:
+                        logging.info(f"[{plugin_name} v{plugin_version}] 已高於或等於漏洞修補版本，忽略 CVE {cve_id}")
     except Exception:
         pass
     return hits
@@ -159,7 +188,7 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
 
 def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     """
-    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (已修復 Elementor / Starter Templates 誤報 Bug)
+    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (加入 SemVer 數字版本比對)
     """
     url = site["url"]
     site_name = site["name"]
@@ -212,7 +241,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 3. 線上 CVE 漏洞比對 (過濾第三方 Addons 誤判)
+    # 3. 線上 CVE 漏洞比對 (名稱過濾 + SemVer 數字版本範圍比對)
     php_cves = check_php_cve(result["php_version"])
     result["cve_hits"].extend(php_cves)
 

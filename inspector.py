@@ -7,7 +7,7 @@ import time
 import json
 import logging
 from typing import Dict, List, Any
-from config import BASELINE_PHP_VERSION, REQUEST_TIMEOUT, REQUEST_RETRY, USER_AGENT, LOG_FILE, GEMINI_API_KEY
+from config import BASELINE_PHP_VERSION, REQUEST_TIMEOUT, REQUEST_RETRY, USER_AGENT, LOG_FILE, OPENAI_API_KEY, OPENAI_MODEL
 
 # 自動建立 logs 目錄
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -37,34 +37,48 @@ def parse_version_tuple(ver_str: str) -> tuple:
 
 def ai_evaluate_vulnerability(asset_name: str, asset_version: str, cve_id: str, cve_desc: str) -> bool:
     """
-    🤖 AI 語意化審核引擎：
+    🤖 ChatGPT 語意化資安裁決引擎：
     分析 CVE 描述文本與受影響版本區間，判定該 CVE 是否「真正影響」當前安裝的版本。
-    回傳 True 表示真正存在漏洞 (需告警)，False 表示經 AI 研判為誤報或已修補版本。
+    回傳 True 表示真正存在漏洞 (需告警)，False 表示經 ChatGPT 研判為誤報或已修補版本。
     """
-    # 1. 若配置了 GEMINI_API_KEY，優先呼叫 Gemini AI 進行深度語意推理
-    if GEMINI_API_KEY:
+    # 1. 若配置了 OPENAI_API_KEY，優先呼叫 OpenAI ChatGPT API 進行資安語意推理
+    if OPENAI_API_KEY:
         try:
+            url = "https://api.openai.com/v1/chat/completions"
             prompt = (
-                f"你是一名資安專家。請評估此 CVE 漏洞報告是否真正影響軟體 {asset_name} 的版本 {asset_version}。\n"
+                f"軟體名稱: {asset_name}\n"
+                f"當前版本: {asset_version}\n"
                 f"CVE ID: {cve_id}\n"
                 f"CVE 描述: {cve_desc}\n\n"
-                f"請回答 JSON 格式: {{\x22is_vulnerable\x22: true/false, \x22reason\x22: \x22簡短說明\x22}}"
+                f"請精確研判：此 CVE 是否真正影響軟體 {asset_name} 的版本 {asset_version}？"
+                f"(若屬第三方擴充外掛誤報或當前版本已高於修補版號，請回答 false)。\n"
+                f"請只回傳 JSON: {{\x22is_vulnerable\x22: true/false, \x22reason\x22: \x22說明\x22}}"
             )
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
-            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            payload = json.dumps({
+                "model": OPENAI_MODEL,
+                "messages": [
+                    {"role": "system", "content": "你是一名精通 WordPress 與 Web 資安的權威專家。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1
+            }).encode('utf-8')
+
+            req = urllib.request.Request(url, data=payload, headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            })
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(req, timeout=5, context=context) as resp:
+            with urllib.request.urlopen(req, timeout=6, context=context) as resp:
                 res_data = json.loads(resp.read().decode('utf-8'))
-                ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
+                ai_text = res_data['choices'][0]['message']['content']
                 if "false" in ai_text.lower():
-                    logging.info(f"[AI 審核] 經 Gemini AI 研判 {asset_name} (v{asset_version}) 之 {cve_id} 為誤報或非主體漏洞")
+                    logging.info(f"[ChatGPT 審核] 經 ChatGPT ({OPENAI_MODEL}) 研判 {asset_name} (v{asset_version}) 之 {cve_id} 為誤報或非主體漏洞")
                     return False
                 return True
         except Exception as e:
-            logging.warning(f"AI API 呼叫失敗，啟用內建 AI 啟發式推理: {str(e)}")
+            logging.warning(f"ChatGPT API 呼叫失敗，自動降級至內建 AI 啟發式推理: {str(e)}")
 
     # 2. 內建 AI 語意與 SemVer 啟發式推理規則 (無需 API Key 即可全自動運作)
     desc_lower = cve_desc.lower()
@@ -77,7 +91,7 @@ def ai_evaluate_vulnerability(asset_name: str, asset_version: str, cve_id: str, 
     ]
     for pat in addon_patterns:
         if re.search(pat, desc_lower) and not re.search(pat, asset_clean):
-            logging.info(f"[AI 啟發式審核] {cve_id} 屬於第三方擴充外掛描述 ({pat})，非 {asset_name} 本體漏洞，自動剔除誤報")
+            logging.info(f"[內建 AI 審核] {cve_id} 屬於第三方擴充外掛描述 ({pat})，非 {asset_name} 本體漏洞，自動剔除誤報")
             return False
 
     # 語意化數字版本比對 (Semantic Versioning)
@@ -87,7 +101,7 @@ def ai_evaluate_vulnerability(asset_name: str, asset_version: str, cve_id: str, 
         if match_before:
             fixed_ver_tuple = parse_version_tuple(match_before.group(1))
             if fixed_ver_tuple and curr_tuple >= fixed_ver_tuple:
-                logging.info(f"[AI 啟發式審核] {asset_name} 當前版本 (v{asset_version}) >= 已修補版本 (v{match_before.group(1)})，判定已安全修補")
+                logging.info(f"[內建 AI 審核] {asset_name} 當前版本 (v{asset_version}) >= 已修補版本 (v{match_before.group(1)})，判定已安全修補")
                 return False
 
     return True
@@ -149,7 +163,7 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     return hits
 
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:
-    """連線 NIST NVD 比對外掛版號，並透過 🤖 AI 審核引擎自動過濾誤報"""
+    """連線 NIST NVD 比對外掛版號，並透過 🤖 ChatGPT API 進行資安審核」"""
     hits = []
     if not plugin_version or plugin_version in ["已知安裝", "Unknown"]:
         return hits
@@ -171,7 +185,7 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
                 cve_id = cve_data.get("id", "CVE-Unknown")
                 desc = cve_data.get("descriptions", [{}])[0].get("value", "")
 
-                # 透過 🤖 AI 語意化審核引擎判定是否為真實漏洞
+                # 透過 🤖 ChatGPT API 進行資安語意裁決
                 if ai_evaluate_vulnerability(plugin_name, plugin_version, cve_id, desc):
                     hits.append({
                         "id": cve_id,
@@ -207,7 +221,7 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
 
 def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     """
-    盤點外掛、主題、PHP 環境與安全 Header，並經過 🤖 AI 審核引擎過濾 CVE 告警
+    盤點外掛、主題、PHP 環境與安全 Header，並經過 🤖 ChatGPT API 審核引擎過濾 CVE 告警
     """
     url = site["url"]
     site_name = site["name"]
@@ -260,7 +274,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 3. 線上 CVE 漏洞比對 (經過 🤖 AI 審核引擎)
+    # 3. 線上 CVE 漏洞比對 (經過 🤖 ChatGPT API 審核)
     php_cves = check_php_cve(result["php_version"])
     result["cve_hits"].extend(php_cves)
 
@@ -273,7 +287,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         result["status"] = "需更新"
         for hit in result["cve_hits"]:
             result["warnings"].append(f"⚠️ [CVE告警] {hit['id']}: {hit['desc']}")
-        logging.warning(f"[{site_name}] 經 AI 審核確認命中 {len(result['cve_hits'])} 項 CVE 漏洞！標示為需更新告警")
+        logging.warning(f"[{site_name}] 經 ChatGPT 審核確認命中 {len(result['cve_hits'])} 項 CVE 漏洞！標示為需更新告警")
 
     logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, 外掛數: {len(result['plugins'])}, CVE命中數: {len(result['cve_hits'])}")
     return result

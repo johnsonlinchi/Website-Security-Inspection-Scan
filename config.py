@@ -22,8 +22,9 @@ ALLOWED_RECIPIENTS = [
 # 預設收件者
 DEFAULT_RECIPIENT = os.getenv("SMTP_RECIPIENT", "39620@portwell.com.tw")
 
-# AI API 設定 (支援 Gemini API / OpenAI API，可選)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# OpenAI ChatGPT API 設定
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # SMTP 發信設定 (可透過環境變數覆寫)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")

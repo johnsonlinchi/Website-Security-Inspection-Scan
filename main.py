@@ -4,17 +4,24 @@ from config import SITES, DEFAULT_RECIPIENT, ALLOWED_RECIPIENTS
 from inspector import run_all_inspections
 from reporter import generate_reports
 from mailer import send_inspection_email
+from ai_tester import test_openai_api_connection
 
 def run_routine_inspection(target_recipient: str = DEFAULT_RECIPIENT):
     print("=" * 60)
     print("[START] 啟動 Portwell WordPress 站台安全巡檢作業")
+    
+    # 0. 測試並印出 ChatGPT API 連線狀態
+    ai_success, ai_msg = test_openai_api_connection()
+    status_icon = "🟢" if ai_success else "🟡"
+    print(f"{status_icon} 🤖 AI 引擎狀態: {ai_msg}")
+
     print(f"固定巡檢 {len(SITES)} 個目標站台:")
     for s in SITES:
         print(f" - {s['name']}: {s['url']}")
     print("=" * 60)
 
-    # 1. 執行資產盤點與維運檢測
-    print("\n[1/3] 執行網址版本與安全標頭檢查中...")
+    # 1. 執行資產盤點與維運檢測 (經 ChatGPT 審核)
+    print("\n[1/3] 執行網址版本與安全標頭檢查中 (ChatGPT 審核中)...")
     inspection_results = run_all_inspections(SITES)
     
     # 2. 產出報告

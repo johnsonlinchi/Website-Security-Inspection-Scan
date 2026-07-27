@@ -1,6 +1,6 @@
 import os
 
-# 預設巡檢與盤點站台 (已加入中國站)
+# 預設巡檢與盤點站台
 SITES = [
     {"name": "國際站", "url": "https://www.portwell.com.tw"},
     {"name": "台灣站", "url": "https://www.portwell.tw"},
@@ -21,6 +21,9 @@ ALLOWED_RECIPIENTS = [
 
 # 預設收件者
 DEFAULT_RECIPIENT = os.getenv("SMTP_RECIPIENT", "39620@portwell.com.tw")
+
+# AI API 設定 (支援 Gemini API / OpenAI API，可選)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # SMTP 發信設定 (可透過環境變數覆寫)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")

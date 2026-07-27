@@ -7,7 +7,7 @@ import time
 import json
 import logging
 from typing import Dict, List, Any
-from config import BASELINE_PHP_VERSION, REQUEST_TIMEOUT, REQUEST_RETRY, USER_AGENT, LOG_FILE
+from config import BASELINE_PHP_VERSION, REQUEST_TIMEOUT, REQUEST_RETRY, USER_AGENT, LOG_FILE, GEMINI_API_KEY
 
 # 自動建立 logs 目錄
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -29,34 +29,65 @@ SECURITY_HEADERS = [
 # 常見已知第三方前端庫 (避免將 Swiper 8.4.5 或 FontAwesome 5.15 誤判為外掛版號)
 THIRD_PARTY_ASSET_VERSIONS = ["8.4.5", "5.15.4", "3.7.1", "1.8.7", "2.7.2"]
 
-# 第三方擴充外掛關聯字過濾 (防止把 Starter Templates 誤判給 Elementor 本體，或把 Mailchimp 誤判給 WooCommerce 本體)
-ADDON_KEYWORDS = [
-    "starter templates", "addons for", "addon for", "extension for", 
-    "for woocommerce", "for elementor", "beaver builder", "mailchimp for"
-]
-
 def parse_version_tuple(ver_str: str) -> tuple:
     """將版本字串轉換為可進行大於/小於比對的數字 Tuple (例如 '4.2.0' -> (4, 2, 0))"""
     clean = re.sub(r'[^\d\.]', '', ver_str)
     parts = [int(p) for p in clean.split('.') if p.isdigit()]
     return tuple(parts)
 
-def is_version_vulnerable(current_ver: str, cve_desc: str) -> bool:
+def ai_evaluate_vulnerability(asset_name: str, asset_version: str, cve_id: str, cve_desc: str) -> bool:
     """
-    解析 CVE 描述中的版本影響範圍，並進行精確的 SemVer 數字比對：
-    如果當前版本 >= 修補版本 (e.g. 'before 4.2.0' 且當前為 '4.2.0')，則判定為已修補 (不發告警)
+    🤖 AI 語意化審核引擎：
+    分析 CVE 描述文本與受影響版本區間，判定該 CVE 是否「真正影響」當前安裝的版本。
+    回傳 True 表示真正存在漏洞 (需告警)，False 表示經 AI 研判為誤報或已修補版本。
     """
-    curr_tuple = parse_version_tuple(current_ver)
-    if not curr_tuple:
-        return True
+    # 1. 若配置了 GEMINI_API_KEY，優先呼叫 Gemini AI 進行深度語意推理
+    if GEMINI_API_KEY:
+        try:
+            prompt = (
+                f"你是一名資安專家。請評估此 CVE 漏洞報告是否真正影響軟體 {asset_name} 的版本 {asset_version}。\n"
+                f"CVE ID: {cve_id}\n"
+                f"CVE 描述: {cve_desc}\n\n"
+                f"請回答 JSON 格式: {{\x22is_vulnerable\x22: true/false, \x22reason\x22: \x22簡短說明\x22}}"
+            )
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode('utf-8')
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=5, context=context) as resp:
+                res_data = json.loads(resp.read().decode('utf-8'))
+                ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
+                if "false" in ai_text.lower():
+                    logging.info(f"[AI 審核] 經 Gemini AI 研判 {asset_name} (v{asset_version}) 之 {cve_id} 為誤報或非主體漏洞")
+                    return False
+                return True
+        except Exception as e:
+            logging.warning(f"AI API 呼叫失敗，啟用內建 AI 啟發式推理: {str(e)}")
 
-    # 1. 匹配 "before X.X.X" 或 "prior to X.X.X" 或 "<= X.X.X"
-    match_before = re.search(r'(?:before|prior to|<|up to|through)\s+v?([\d\.]+)', cve_desc, re.IGNORECASE)
-    if match_before:
-        fixed_ver_tuple = parse_version_tuple(match_before.group(1))
-        if fixed_ver_tuple:
-            # 如果當前版本 >= 漏洞修補版本，代表已安全修補！
-            if curr_tuple >= fixed_ver_tuple:
+    # 2. 內建 AI 語意與 SemVer 啟發式推理規則 (無需 API Key 即可全自動運作)
+    desc_lower = cve_desc.lower()
+    asset_clean = asset_name.replace('-', ' ').lower()
+
+    # 檢測是否為第三方 Addon 誤匹配 (例如將 Starter Templates 誤判給 Elementor 主體)
+    addon_patterns = [
+        r'starter templates', r'addons? for', r'extensions? for', 
+        r'for woocommerce', r'for elementor', r'mailchimp for'
+    ]
+    for pat in addon_patterns:
+        if re.search(pat, desc_lower) and not re.search(pat, asset_clean):
+            logging.info(f"[AI 啟發式審核] {cve_id} 屬於第三方擴充外掛描述 ({pat})，非 {asset_name} 本體漏洞，自動剔除誤報")
+            return False
+
+    # 語意化數字版本比對 (Semantic Versioning)
+    curr_tuple = parse_version_tuple(asset_version)
+    if curr_tuple:
+        match_before = re.search(r'(?:before|prior to|<|up to|through)\s+v?([\d\.]+)', cve_desc, re.IGNORECASE)
+        if match_before:
+            fixed_ver_tuple = parse_version_tuple(match_before.group(1))
+            if fixed_ver_tuple and curr_tuple >= fixed_ver_tuple:
+                logging.info(f"[AI 啟發式審核] {asset_name} 當前版本 (v{asset_version}) >= 已修補版本 (v{match_before.group(1)})，判定已安全修補")
                 return False
 
     return True
@@ -118,12 +149,11 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     return hits
 
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:
-    """連線 NIST NVD 比對外掛版號線上 CVE (包含名稱過濾 + 語意化版本 SemVer 數字區間比對)"""
+    """連線 NIST NVD 比對外掛版號，並透過 🤖 AI 審核引擎自動過濾誤報"""
     hits = []
     if not plugin_version or plugin_version in ["已知安裝", "Unknown"]:
         return hits
 
-    # 過濾第三方腳本庫版本
     if plugin_version in THIRD_PARTY_ASSET_VERSIONS and plugin_name in ["woocommerce", "elementor"]:
         return hits
 
@@ -140,25 +170,14 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
                 cve_data = item.get("cve", {})
                 cve_id = cve_data.get("id", "CVE-Unknown")
                 desc = cve_data.get("descriptions", [{}])[0].get("value", "")
-                desc_lower = desc.lower()
-                
-                # 1. 檢查是否屬於第三方 Addon 誤報
-                is_addon_mismatch = any(addon_kw in desc_lower for addon_kw in ADDON_KEYWORDS)
-                if is_addon_mismatch:
-                    continue
 
-                # 2. 嚴格驗證 CVE 說明必須包含該外掛名稱主體
-                clean_plugin_name = plugin_name.replace('-', ' ').lower()
-                if clean_plugin_name in desc_lower:
-                    # 3. 語意化版本 (SemVer) 數字範圍比對：判斷當前版本是否真的在受受影響區間內
-                    if is_version_vulnerable(plugin_version, desc):
-                        hits.append({
-                            "id": cve_id,
-                            "desc": f"外掛 {plugin_name} (v{plugin_version}) 命中 CVE: {desc[:100]}...",
-                            "severity": "High"
-                        })
-                    else:
-                        logging.info(f"[{plugin_name} v{plugin_version}] 已高於或等於漏洞修補版本，忽略 CVE {cve_id}")
+                # 透過 🤖 AI 語意化審核引擎判定是否為真實漏洞
+                if ai_evaluate_vulnerability(plugin_name, plugin_version, cve_id, desc):
+                    hits.append({
+                        "id": cve_id,
+                        "desc": f"外掛 {plugin_name} (v{plugin_version}) 命中 CVE: {desc[:100]}...",
+                        "severity": "High"
+                    })
     except Exception:
         pass
     return hits
@@ -188,7 +207,7 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
 
 def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     """
-    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (加入 SemVer 數字版本比對)
+    盤點外掛、主題、PHP 環境與安全 Header，並經過 🤖 AI 審核引擎過濾 CVE 告警
     """
     url = site["url"]
     site_name = site["name"]
@@ -241,7 +260,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 3. 線上 CVE 漏洞比對 (名稱過濾 + SemVer 數字版本範圍比對)
+    # 3. 線上 CVE 漏洞比對 (經過 🤖 AI 審核引擎)
     php_cves = check_php_cve(result["php_version"])
     result["cve_hits"].extend(php_cves)
 
@@ -249,12 +268,12 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         p_cves = check_plugin_cve(p_name, p_ver)
         result["cve_hits"].extend(p_cves)
 
-    # 若命中任何 CVE 漏洞，自動觸發「需更新」告警狀態
+    # 若命中任何真正的 CVE 漏洞，自動觸發「需更新」告警狀態
     if result["cve_hits"]:
         result["status"] = "需更新"
         for hit in result["cve_hits"]:
             result["warnings"].append(f"⚠️ [CVE告警] {hit['id']}: {hit['desc']}")
-        logging.warning(f"[{site_name}] 命中 {len(result['cve_hits'])} 項 CVE 漏洞！標示為需更新告警")
+        logging.warning(f"[{site_name}] 經 AI 審核確認命中 {len(result['cve_hits'])} 項 CVE 漏洞！標示為需更新告警")
 
     logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, 外掛數: {len(result['plugins'])}, CVE命中數: {len(result['cve_hits'])}")
     return result

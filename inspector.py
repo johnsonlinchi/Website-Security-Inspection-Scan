@@ -29,6 +29,12 @@ SECURITY_HEADERS = [
 # 常見已知第三方前端庫 (避免將 Swiper 8.4.5 或 FontAwesome 5.15 誤判為外掛版號)
 THIRD_PARTY_ASSET_VERSIONS = ["8.4.5", "5.15.4", "3.7.1", "1.8.7", "2.7.2"]
 
+# 第三方擴充外掛關聯字過濾 (防止把 Starter Templates 誤判給 Elementor 本體，或把 Mailchimp 誤判給 WooCommerce 本體)
+ADDON_KEYWORDS = [
+    "starter templates", "addons for", "addon for", "extension for", 
+    "for woocommerce", "for elementor", "beaver builder", "mailchimp for"
+]
+
 def get_exact_plugin_version(base_url: str, plugin_slug: str) -> str:
     """從外掛公開之 readme.txt 精確讀取真實版號 (若失敗則回傳空)"""
     readme_url = f"{base_url.rstrip('/')}/wp-content/plugins/{plugin_slug}/readme.txt"
@@ -86,17 +92,18 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     return hits
 
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:
-    """連線 NIST NVD 比對外掛版號線上 CVE (精確過濾第三方庫雜訊)"""
+    """連線 NIST NVD 比對外掛版號線上 CVE (嚴格排除第三方 Addons 誤報)"""
     hits = []
     if not plugin_version or plugin_version in ["已知安裝", "Unknown"]:
         return hits
 
-    # 過濾第三方腳本庫版本 (如 2.7.2 / 8.4.5 等外部載入 JS 造成的誤報)
+    # 過濾第三方腳本庫版本
     if plugin_version in THIRD_PARTY_ASSET_VERSIONS and plugin_name in ["woocommerce", "elementor"]:
         return hits
 
     try:
-        query = f"wordpress {plugin_name} {plugin_version}"
+        # 使用精確外掛標頭查詢
+        query = f"wordpress plugin {plugin_name} {plugin_version}"
         url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={urllib.parse.quote(query)}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         context = ssl.create_default_context()
@@ -104,13 +111,20 @@ def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, st
         context.verify_mode = ssl.CERT_NONE
         with urllib.request.urlopen(req, timeout=4, context=context) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-            for item in data.get("vulnerabilities", [])[:1]:
+            for item in data.get("vulnerabilities", [])[:2]:
                 cve_data = item.get("cve", {})
                 cve_id = cve_data.get("id", "CVE-Unknown")
                 desc = cve_data.get("descriptions", [{}])[0].get("value", "")
+                desc_lower = desc.lower()
                 
-                # 嚴格驗證 CVE 說明必須包含該外掛名稱，避免跨外掛關鍵字誤抓
-                if plugin_name.replace('-', ' ').lower() in desc.lower():
+                # 1. 檢查是否屬於第三方 Addon 誤報 (如 Starter Templates 誤判給 Elementor)
+                is_addon_mismatch = any(addon_kw in desc_lower for addon_kw in ADDON_KEYWORDS)
+                if is_addon_mismatch:
+                    continue
+
+                # 2. 嚴格驗證 CVE 說明必須包含該外掛名稱主體
+                clean_plugin_name = plugin_name.replace('-', ' ').lower()
+                if clean_plugin_name in desc_lower:
                     hits.append({
                         "id": cve_id,
                         "desc": f"外掛 {plugin_name} (v{plugin_version}) 命中 CVE: {desc[:100]}...",
@@ -145,7 +159,7 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
 
 def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     """
-    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (加入 readme.txt 精確版號解析)
+    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (已修復 Elementor / Starter Templates 誤報 Bug)
     """
     url = site["url"]
     site_name = site["name"]
@@ -181,17 +195,15 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         result["warnings"].append(f"缺少 HTTP 安全標頭: {', '.join(missing_headers)}")
         result["status"] = "需更新"
 
-    # 2. 外掛與主題盤點 (優先從 readme.txt 精確抓取，防前端 JS 雜訊誤判)
+    # 2. 外掛與主題盤點 (優先從 readme.txt 精確抓取)
     plugin_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)
     discovered_slugs = set(p[0] for p in plugin_matches)
 
     for slug in discovered_slugs:
-        # 先嘗試從公開 readme.txt 讀取真實 Stable Tag 版號
         exact_ver = get_exact_plugin_version(url, slug)
         if exact_ver:
             result["plugins"][slug] = exact_ver
         else:
-            # 找不到 readme.txt 時才降級採納前端 JS 參數 (並排除常見第三方庫)
             for p_name, p_ver in plugin_matches:
                 if p_name == slug:
                     if p_ver not in THIRD_PARTY_ASSET_VERSIONS or slug not in result["plugins"]:
@@ -200,7 +212,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 3. 線上 CVE 漏洞比對 (PHP 與精確外掛版號)
+    # 3. 線上 CVE 漏洞比對 (過濾第三方 Addons 誤判)
     php_cves = check_php_cve(result["php_version"])
     result["cve_hits"].extend(php_cves)
 

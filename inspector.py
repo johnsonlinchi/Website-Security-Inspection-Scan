@@ -30,7 +30,6 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     """比對 PHP 版本已知 CVE 漏洞 (同步 Nessus Plugin ID 313114 & 324980)"""
     hits = []
     if not version or "環境基準" in version:
-        # 若為預設基準值 8.3.32，已屬最新安全修補版本
         clean_ver = BASELINE_PHP_VERSION
     else:
         clean_ver = version
@@ -65,34 +64,8 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
         pass
     return hits
 
-def check_wp_cve(version: str) -> List[Dict[str, str]]:
-    """連線 NIST NVD 官方資料庫比對 WordPress 核心 CVE 漏洞"""
-    hits = []
-    if not version or version in ["未公開揭露", "Unknown"]:
-        return hits
-    try:
-        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=cpe:2.3:a:wordpress:wordpress:{urllib.parse.quote(version)}:*:*:*:*:*:*:*"
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(req, timeout=4, context=context) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            for item in data.get("vulnerabilities", [])[:2]:
-                cve_data = item.get("cve", {})
-                cve_id = cve_data.get("id", "CVE-Unknown")
-                desc = cve_data.get("descriptions", [{}])[0].get("value", "")
-                hits.append({
-                    "id": cve_id,
-                    "desc": f"WordPress 核心 ({version}) 命中 NVD CVE: {desc[:100]}...",
-                    "severity": "High"
-                })
-    except Exception:
-        pass
-    return hits
-
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:
-    """比對已偵測外掛之線上 CVE 漏洞庫"""
+    """連線 NIST NVD 比對外掛版本線上 CVE 漏洞"""
     hits = []
     if not plugin_version or plugin_version in ["已知安裝", "Unknown"]:
         return hits
@@ -144,7 +117,7 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
 
 def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     """
-    盤點 WordPress 核心、外掛、主題與 Header，並比對 CVE 漏洞自動標示告警
+    盤點外掛、主題、PHP 環境與安全 Header，比對 CVE 漏洞自動標示告警 (已移除 WP 核心比對)
     """
     url = site["url"]
     site_name = site["name"]
@@ -153,7 +126,6 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         "name": site_name,
         "url": url,
         "status": "正常",  # 狀態分類：正常、需更新、需人工檢查
-        "wp_version": "未公開揭露",
         "php_version": f"{BASELINE_PHP_VERSION} (環境基準)",
         "plugins": {},
         "themes": [],
@@ -181,18 +153,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         result["warnings"].append(f"缺少 HTTP 安全標頭: {', '.join(missing_headers)}")
         result["status"] = "需更新"
 
-    # 2. WordPress 核心版本解析
-    wp_gen = re.search(r'<meta\s+name=["\']generator["\']\s+content=["\']WordPress\s+([5-9]\.[\d\.]+)', html_text, re.IGNORECASE)
-    if wp_gen:
-        result["wp_version"] = wp_gen.group(1)
-    else:
-        embed_ver = re.search(r'wp-includes/js/wp-embed\.min\.js\?ver=([5-9]\.[\d\.]+)', html_text)
-        if embed_ver:
-            result["wp_version"] = embed_ver.group(1)
-        else:
-            result["manual_checks"].append("WordPress 核心版本 (前台已進行資安隱蔽保護，運作正常)")
-
-    # 3. 外掛與主題盤點
+    # 2. 外掛與主題盤點
     plugin_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)
     for p_name, p_ver in plugin_matches:
         result["plugins"][p_name] = p_ver
@@ -200,26 +161,22 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 4. 線上 CVE 漏洞自動審核與比對 (PHP, WP 核心, 盤點到的外掛)
+    # 3. 線上 CVE 漏洞比對 (PHP 與盤點到的外掛，不比對 WP 核心)
     php_cves = check_php_cve(result["php_version"])
     result["cve_hits"].extend(php_cves)
 
-    wp_cves = check_wp_cve(result["wp_version"])
-    result["cve_hits"].extend(wp_cves)
-
-    # 外掛 CVE 比對
     for p_name, p_ver in result["plugins"].items():
         p_cves = check_plugin_cve(p_name, p_ver)
         result["cve_hits"].extend(p_cves)
 
-    # 若命中任何 CVE 漏洞，自動觸發「需更新」告警狀態並紀錄 Warnings
+    # 若命中任何 CVE 漏洞，自動觸發「需更新」告警狀態
     if result["cve_hits"]:
         result["status"] = "需更新"
         for hit in result["cve_hits"]:
             result["warnings"].append(f"⚠️ [CVE告警] {hit['id']}: {hit['desc']}")
         logging.warning(f"[{site_name}] 命中 {len(result['cve_hits'])} 項 CVE 漏洞！標示為需更新告警")
 
-    logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, WP核心: {result['wp_version']}, CVE命中數: {len(result['cve_hits'])}")
+    logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, 外掛數: {len(result['plugins'])}, CVE命中數: {len(result['cve_hits'])}")
     return result
 
 def run_all_inspections(sites: List[Dict[str, str]]) -> List[Dict[str, Any]]:

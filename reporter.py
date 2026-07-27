@@ -29,7 +29,7 @@ def generate_reports(inspection_results: List[Dict[str, Any]]) -> Dict[str, str]
 
     html_lines.append("<h2>1. 執行摘要 (Date: " + scan_date + ")</h2>")
     html_lines.append("<table border='1' cellpadding='6' cellspacing='0' style='border-collapse: collapse; border: 1px solid #999; width: 100%;'>")
-    html_lines.append(f"<tr style='background-color: #f2f2f2;'><th>總盤點站台數</th><th>正常</th><th>需更新 (標頭/漏洞/CVE告警)</th><th>需人工檢查</th></tr>")
+    html_lines.append(f"<tr style='background-color: #f2f2f2;'><th>總盤點站台數</th><th>正常</th><th>需更新 (標頭/外掛CVE告警)</th><th>需人工檢查</th></tr>")
     html_lines.append(f"<tr><td>{total_sites}</td><td style='color:green; font-weight:bold;'>{status_summary['正常']}</td><td style='color:orange; font-weight:bold;'>{status_summary['需更新']}</td><td style='color:red; font-weight:bold;'>{status_summary['需人工檢查']}</td></tr>")
     html_lines.append("</table><br/>")
 
@@ -43,7 +43,7 @@ def generate_reports(inspection_results: List[Dict[str, Any]]) -> Dict[str, str]
 
     html_lines.append("<h2>3. 逐站資產與維運盤點結果表</h2>")
     html_lines.append("<table border='1' cellpadding='6' cellspacing='0' style='border-collapse: collapse; border: 1px solid #999; width: 100%;'>")
-    html_lines.append("<tr style='background-color: #f2f2f2;'><th>站台</th><th>狀態分類</th><th>WP 核心</th><th>PHP 環境</th><th>主要外掛/主題</th><th>維運警告、CVE 告警與人工確認</th></tr>")
+    html_lines.append("<tr style='background-color: #f2f2f2;'><th>站台</th><th>狀態分類</th><th>PHP 環境</th><th>主要外掛/主題</th><th>維運警告與 CVE 告警</th></tr>")
     
     for r in inspection_results:
         st = r["status"]
@@ -58,7 +58,6 @@ def generate_reports(inspection_results: List[Dict[str, Any]]) -> Dict[str, str]
         html_lines.append(f"<tr>")
         html_lines.append(f"<td><strong>{r['name']}</strong><br/>{r['url']}</td>")
         html_lines.append(f"<td style='color:{st_color}; font-weight:bold;'>{st}</td>")
-        html_lines.append(f"<td>{r['wp_version']}</td>")
         html_lines.append(f"<td>{r['php_version']}</td>")
         html_lines.append(f"<td>{plugins_str}</td>")
         html_lines.append(f"<td>{notes_str}</td>")

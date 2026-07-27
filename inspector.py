@@ -38,7 +38,9 @@ def fetch_url_with_retry(url: str) -> tuple[str, dict]:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=context) as resp:
                 html_bytes = resp.read()
                 html_text = html_bytes.decode('utf-8', errors='ignore')
-                resp_headers = dict(resp.info())
+                resp_info = resp.info()
+                # 轉為完全不分大小寫的標頭 Dictionary
+                resp_headers = {str(k).lower(): str(v) for k, v in resp_info.items()}
                 return html_text, resp_headers
         except Exception as e:
             logging.warning(f"重試 [{attempt}/{REQUEST_RETRY}] 讀取 {url} 失敗: {str(e)}")
@@ -65,7 +67,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         "manual_checks": []
     }
 
-    html_text, headers = fetch_url_with_retry(url)
+    html_text, headers_lower = fetch_url_with_retry(url)
 
     if not html_text:
         result["status"] = "需人工檢查"
@@ -74,17 +76,15 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         logging.error(f"[{site_name}] 連線失敗，標記為需人工檢查")
         return result
 
-    # 1. 安全標頭與 Header 盤點
+    # 1. 完全不分大小寫的 HTTP 安全標頭盤點 (支援 HTTP/1.1 與 HTTP/2 小寫標頭)
     missing_headers = []
     for h in SECURITY_HEADERS:
-        val = headers.get(h) or headers.get(h.lower())
-        if not val:
+        if h.lower() not in headers_lower:
             missing_headers.append(h)
 
     if missing_headers:
         result["warnings"].append(f"缺少 HTTP 安全標頭: {', '.join(missing_headers)}")
-        if result["status"] == "正常":
-            result["status"] = "需更新"
+        result["status"] = "需更新"
 
     # 2. WordPress 核心版本解析
     wp_gen = re.search(r'<meta\s+name=["\']generator["\']\s+content=["\']WordPress\s+([5-9]\.[\d\.]+)', html_text, re.IGNORECASE)
@@ -95,7 +95,8 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
         if embed_ver:
             result["wp_version"] = embed_ver.group(1)
         else:
-            result["manual_checks"].append("WordPress 核心版本 (前台已進行防衛性隱蔽，建議從後台確認)")
+            # 前台防衛性隱蔽屬於良好資安做法，僅紀錄資訊，不強制判定為紅色「需人工檢查」
+            result["manual_checks"].append("WordPress 核心版本 (前台已進行資安隱蔽保護，運作正常)")
 
     # 3. 外掛與主題盤點
     plugin_matches = re.findall(r'wp-content/plugins/([^/]+)/[^"\']+\?ver=([\d\.]+)', html_text)
@@ -105,11 +106,7 @@ def inspect_site_assets(site: Dict[str, str]) -> Dict[str, Any]:
     themes = set(re.findall(r'wp-content/themes/([^/\?\'"]+)', html_text))
     result["themes"] = list(themes)
 
-    # 最終狀態劃分邏輯
-    if result["manual_checks"] and result["status"] == "正常":
-        result["status"] = "需人工檢查"
-
-    logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, WP核心: {result['wp_version']}, 外掛數: {len(result['plugins'])}")
+    logging.info(f"[{site_name}] 盤點完成，狀態: {result['status']}, WP核心: {result['wp_version']}, 缺少標頭數: {len(missing_headers)}")
     return result
 
 def run_all_inspections(sites: List[Dict[str, str]]) -> List[Dict[str, Any]]:

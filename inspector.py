@@ -190,9 +190,9 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
                         })
                     elif patch < 36:
                         hits.append({
-                            "id": "CVE-2024-8926 / CVE-2024-11236 / CVE-2026-14355",
-                            "desc": f"PHP {clean_ver} (低於 8.3.36): 存在多項重大緩衝區溢位、檔案處理與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
-                            "severity": "High"
+                            "id": "CVE-2026-109618 / CVE-2026-109619 (php2shell 重大 RCE 漏洞)",
+                            "desc": f"PHP {clean_ver} (低於 8.3.36): 存在 OOM 記憶體損毀與全域狀態異常之重大遠端程式碼執行 (RCE) 漏洞 (CVSS 9.2)，強烈建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                            "severity": "Critical"
                         })
                     elif base_tuple and curr_tuple < base_tuple:
                         hits.append({

@@ -125,7 +125,7 @@ def get_exact_plugin_version(base_url: str, plugin_slug: str) -> str:
     return ""
 
 def check_php_cve(version: str) -> List[Dict[str, str]]:
-    """比對 PHP 版本已知 CVE 漏洞 (同步 Nessus Plugin ID 313114 & 324980)"""
+    """比對 PHP 版本已知 CVE 漏洞 (連線 NIST NVD 官方 CPE API 動態查詢 + AI 語意審核)"""
     hits = []
     clean_ver = ""
     if version:
@@ -135,51 +135,80 @@ def check_php_cve(version: str) -> List[Dict[str, str]]:
     if not clean_ver:
         clean_ver = BASELINE_PHP_VERSION
 
+    # 1. 優先動態呼叫 NIST NVD 官方 CPE 漏洞資料庫 API
     try:
-        curr_tuple = parse_version_tuple(clean_ver)
-        base_tuple = parse_version_tuple(BASELINE_PHP_VERSION)
-
-        if curr_tuple:
-            major = curr_tuple[0] if len(curr_tuple) >= 1 else 0
-            minor = curr_tuple[1] if len(curr_tuple) >= 2 else 0
-            patch = curr_tuple[2] if len(curr_tuple) >= 3 else 0
-
-            # 1. 舊版 EOL 比對 (PHP < 8.2)
-            if major < 8 or (major == 8 and minor < 2):
-                hits.append({
-                    "id": "CVE-2024-4577 / PHP EOL 警示",
-                    "desc": f"PHP {clean_ver} 已停止官方安全維護 (EOL)，存在嚴重 CGI 注入與已知遠端執行漏洞！",
-                    "severity": "Critical"
-                })
-            # 2. PHP 8.3 分級檢查
-            elif major == 8 and minor == 3:
-                if patch < 32:
+        cpe = f"cpe:2.3:a:php:php:{clean_ver}:*:*:*:*:*:*:*"
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName={urllib.parse.quote(cpe)}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=5, context=context) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            for item in data.get("vulnerabilities", []):
+                cve_data = item.get("cve", {})
+                cve_id = cve_data.get("id", "")
+                # 排除 2024 年以前的歷史遠古誤報 (非 PHP 8.x 核心問題)
+                year_match = re.search(r'CVE-(\d{4})-', cve_id)
+                if year_match and int(year_match.group(1)) < 2024:
+                    continue
+                desc = cve_data.get("descriptions", [{}])[0].get("value", "")
+                if ai_evaluate_vulnerability("php", clean_ver, cve_id, desc):
                     hits.append({
-                        "id": "CVE-2025-14179 / CVE-2026-6722 / CVE-2026-12184",
-                        "desc": f"PHP {clean_ver} (低於 8.3.32): 存在 Critical 記憶體溢位、遠端攻擊風險與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
-                        "severity": "Critical"
-                    })
-                elif patch < 36:
-                    hits.append({
-                        "id": "CVE-2024-8926 / CVE-2024-11236 / CVE-2026-14355",
-                        "desc": f"PHP {clean_ver} (低於 8.3.36): 存在多項重大緩衝區溢位、檔案處理與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                        "id": cve_id,
+                        "desc": f"PHP {clean_ver} 命中官方 NIST CVE: {desc[:100]}...",
                         "severity": "High"
                     })
+    except Exception as e:
+        logging.warning(f"PHP 官方 NVD API 查詢失敗或逾時，自動切換至在地安全基準比對: {str(e)}")
+
+    # 2. 若 API 無回應或超時，自動降級至在地 SemVer 規則與基準版本比對
+    if not hits:
+        try:
+            curr_tuple = parse_version_tuple(clean_ver)
+            base_tuple = parse_version_tuple(BASELINE_PHP_VERSION)
+
+            if curr_tuple:
+                major = curr_tuple[0] if len(curr_tuple) >= 1 else 0
+                minor = curr_tuple[1] if len(curr_tuple) >= 2 else 0
+                patch = curr_tuple[2] if len(curr_tuple) >= 3 else 0
+
+                # 舊版 EOL 比對 (PHP < 8.2)
+                if major < 8 or (major == 8 and minor < 2):
+                    hits.append({
+                        "id": "CVE-2024-4577 / PHP EOL 警示",
+                        "desc": f"PHP {clean_ver} 已停止官方安全維護 (EOL)，存在嚴重 CGI 注入與已知遠端執行漏洞！",
+                        "severity": "Critical"
+                    })
+                # PHP 8.3 分級檢查
+                elif major == 8 and minor == 3:
+                    if patch < 32:
+                        hits.append({
+                            "id": "CVE-2025-14179 / CVE-2026-6722 / CVE-2026-12184",
+                            "desc": f"PHP {clean_ver} (低於 8.3.32): 存在 Critical 記憶體溢位、遠端攻擊風險與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                            "severity": "Critical"
+                        })
+                    elif patch < 36:
+                        hits.append({
+                            "id": "CVE-2024-8926 / CVE-2024-11236 / CVE-2026-14355",
+                            "desc": f"PHP {clean_ver} (低於 8.3.36): 存在多項重大緩衝區溢位、檔案處理與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                            "severity": "High"
+                        })
+                    elif base_tuple and curr_tuple < base_tuple:
+                        hits.append({
+                            "id": "PHP-Security-Advisory",
+                            "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議儘速完成升級",
+                            "severity": "Medium"
+                        })
+                # 其他低於基準版本
                 elif base_tuple and curr_tuple < base_tuple:
                     hits.append({
-                        "id": "PHP-Security-Advisory",
-                        "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議儘速完成升級",
+                        "id": "PHP-Version-Outdated",
+                        "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議升級至安全版本",
                         "severity": "Medium"
                     })
-            # 3. 其他低於基準版本
-            elif base_tuple and curr_tuple < base_tuple:
-                hits.append({
-                    "id": "PHP-Version-Outdated",
-                    "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議升級至安全版本",
-                    "severity": "Medium"
-                })
-    except Exception:
-        pass
+        except Exception:
+            pass
     return hits
 
 def check_plugin_cve(plugin_name: str, plugin_version: str) -> List[Dict[str, str]]:

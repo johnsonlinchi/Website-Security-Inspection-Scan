@@ -127,36 +127,56 @@ def get_exact_plugin_version(base_url: str, plugin_slug: str) -> str:
 def check_php_cve(version: str) -> List[Dict[str, str]]:
     """比對 PHP 版本已知 CVE 漏洞 (同步 Nessus Plugin ID 313114 & 324980)"""
     hits = []
-    if not version or "環境基準" in version:
+    clean_ver = ""
+    if version:
+        m = re.search(r'(\d+\.\d+(?:\.\d+)?)', version)
+        if m:
+            clean_ver = m.group(1)
+    if not clean_ver:
         clean_ver = BASELINE_PHP_VERSION
-    else:
-        clean_ver = version
 
     try:
-        v_parts = clean_ver.split('.')
-        if len(v_parts) >= 2:
-            major = int(v_parts[0])
-            minor = int(v_parts[1])
-            patch = int(v_parts[2]) if len(v_parts) >= 3 else 0
+        curr_tuple = parse_version_tuple(clean_ver)
+        base_tuple = parse_version_tuple(BASELINE_PHP_VERSION)
 
-            if major == 8 and minor == 3:
-                if patch < 31:
-                    hits.append({
-                        "id": "CVE-2025-14179 / CVE-2026-6722",
-                        "desc": f"PHP {clean_ver} (低於 8.3.31): 存在 Critical 記憶體溢位與遠端攻擊風險，建議升級至 PHP 8.3.32+",
-                        "severity": "Critical"
-                    })
-                elif patch < 32:
-                    hits.append({
-                        "id": "CVE-2026-12184",
-                        "desc": f"PHP {clean_ver} (低於 8.3.32): 存在安全修補缺陷，建議升級至 PHP 8.3.32+",
-                        "severity": "Medium"
-                    })
-            elif major < 8 or (major == 8 and minor < 2):
+        if curr_tuple:
+            major = curr_tuple[0] if len(curr_tuple) >= 1 else 0
+            minor = curr_tuple[1] if len(curr_tuple) >= 2 else 0
+            patch = curr_tuple[2] if len(curr_tuple) >= 3 else 0
+
+            # 1. 舊版 EOL 比對 (PHP < 8.2)
+            if major < 8 or (major == 8 and minor < 2):
                 hits.append({
                     "id": "CVE-2024-4577 / PHP EOL 警示",
                     "desc": f"PHP {clean_ver} 已停止官方安全維護 (EOL)，存在嚴重 CGI 注入與已知遠端執行漏洞！",
                     "severity": "Critical"
+                })
+            # 2. PHP 8.3 分級檢查
+            elif major == 8 and minor == 3:
+                if patch < 32:
+                    hits.append({
+                        "id": "CVE-2025-14179 / CVE-2026-6722 / CVE-2026-12184",
+                        "desc": f"PHP {clean_ver} (低於 8.3.32): 存在 Critical 記憶體溢位、遠端攻擊風險與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                        "severity": "Critical"
+                    })
+                elif patch < 36:
+                    hits.append({
+                        "id": "CVE-2024-8926 / CVE-2024-11236 / CVE-2026-14355",
+                        "desc": f"PHP {clean_ver} (低於 8.3.36): 存在多項重大緩衝區溢位、檔案處理與安全修補缺陷，建議升級至 PHP {BASELINE_PHP_VERSION}+",
+                        "severity": "High"
+                    })
+                elif base_tuple and curr_tuple < base_tuple:
+                    hits.append({
+                        "id": "PHP-Security-Advisory",
+                        "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議儘速完成升級",
+                        "severity": "Medium"
+                    })
+            # 3. 其他低於基準版本
+            elif base_tuple and curr_tuple < base_tuple:
+                hits.append({
+                    "id": "PHP-Version-Outdated",
+                    "desc": f"PHP {clean_ver} 低於目前環境基準安全版本 ({BASELINE_PHP_VERSION})，建議升級至安全版本",
+                    "severity": "Medium"
                 })
     except Exception:
         pass

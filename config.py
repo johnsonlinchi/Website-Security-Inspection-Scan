@@ -10,8 +10,8 @@ SITES = [
     {"name": "中國站", "url": "https://www.portwell.com.cn"}
 ]
 
-# 基準環境版本 (如 PHP 8.3.32)
-BASELINE_PHP_VERSION = "8.3.32"
+# 基準環境版本 (如 PHP 8.3.36)
+BASELINE_PHP_VERSION = "8.3.36"
 
 # 允許的固定收件者白名單 (邊界控制)
 ALLOWED_RECIPIENTS = [
